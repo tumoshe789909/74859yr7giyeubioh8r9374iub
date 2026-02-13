@@ -1,34 +1,178 @@
 workflows:
-  bootstrap_signing:
-    name: Bootstrap signing (create iOS Distribution p12 once)
-    max_build_duration: 10
+  ios_appstore_manual_signing:
+    name: iOS App Store Manual signing
+    max_build_duration: 60
+
     environment:
-      xcode: 16.4
       groups:
+        - signing            # CERTIFICATE_P12, CERTIFICATE_PASSWORD, MOBILEPROVISION
         - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
       vars:
-        CERT_PASSWORD: "y3487yu3rhiu"   # после прогонa перенеси в Secrets
+        XCODE_PROJECT: "Cost Per Wear Smart Wardrober.xcodeproj"
+        XCODE_SCHEME: "Cost Per Wear Smart Wardrobe"
+        BUNDLE_ID: "io.denominator.turner"
+        TEAM_ID: "OVERRIDE_BY_PROFILE"
+        EXPORT_METHOD: "app-store"
+
     scripts:
-      - name: Generate PKCS#8 private key
+      - name: Import certificate and provisioning profile
         script: |
           set -euo pipefail
-          # PKCS#1 -> PKCS#8 (нужен формат с заголовком BEGIN PRIVATE KEY)
-          openssl genrsa -out dist_pkcs1.key 2048
-          openssl pkcs8 -topk8 -in dist_pkcs1.key -nocrypt -out dist.key
 
-      - name: Create iOS Distribution cert and package into p12
-        script: |
-          set -euo pipefail
-          app-store-connect certificates create \
-            --type IOS_DISTRIBUTION \
-            --certificate-key "$(cat dist.key)" \
-            --p12-password "$CERT_PASSWORD" \
-            --p12-path dist.p12 \
-            --save
+          CERT_P12_B64="${CERTIFICATE_P12:-${CERT_P12:-}}"
+          CERT_PWD="${CERTIFICATE_PASSWORD:-${CERT_PASSWORD:-}}"
+          PROFILE_B64="${MOBILEPROVISION:-${PROFILE_MOBILEPROVISION:-}}"
 
-      - name: Prepare artifact for Secrets (base64)
+          [ -n "$CERT_P12_B64" ] || { echo "❌ Missing CERTIFICATE_P12 (или CERT_P12) в группе 'signing' — это base64 вашего .p12"; exit 1; }
+          [ -n "$PROFILE_B64" ]  || { echo "❌ Missing MOBILEPROVISION (или PROFILE_MOBILEPROVISION) — это base64 вашего .mobileprovision (App Store)"; exit 1; }
+
+          printf '%s' "$CERT_P12_B64" | base64 --decode > cert.p12
+          printf '%s' "$PROFILE_B64"  | base64 --decode > profile.mobileprovision
+
+          echo "=== DEBUG cert.p12 ==="
+          ls -l cert.p12 || true
+          wc -c cert.p12 || true
+          file cert.p12 || true
+          shasum -a 256 cert.p12 || true
+          xxd -l 32 cert.p12 || true
+
+          echo "=== DEBUG profile.mobileprovision ==="
+          ls -l profile.mobileprovision || true
+          wc -c profile.mobileprovision || true
+          file profile.mobileprovision || true
+          shasum -a 256 profile.mobileprovision || true
+
+          echo "=== DEBUG openssl pkcs12 parse ==="
+          if [ -n "$CERT_PWD" ]; then
+            openssl pkcs12 -in cert.p12 -info -noout -passin pass:"$CERT_PWD"
+          else
+            openssl pkcs12 -in cert.p12 -info -noout -passin pass:
+          fi
+
+          # Keychain + certificate (manual import, no set-keychain-settings)
+          KEYCHAIN_PATH="$HOME/Library/Keychains/codemagic_signing.keychain-db"
+          KEYCHAIN_PASSWORD="cm_temp_keychain_pass"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" || true
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Ensure keychain is in search list + default
+          security list-keychains -d user || true
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+
+          # Import p12
+          if [ -n "$CERT_PWD" ]; then
+            security import cert.p12 -k "$KEYCHAIN_PATH" -P "$CERT_PWD" -A
+          else
+            security import cert.p12 -k "$KEYCHAIN_PATH" -A
+          fi
+
+          # Allow codesign to use the key in CI
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" || true
+
+          echo "== Code signing identities in manual keychain =="
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+
+          # Install profile and extract UUID + TeamIdentifier
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_PLIST="$(security cms -D -i profile.mobileprovision)"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin <<< "$PROFILE_PLIST")
+          PROFILE_TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print TeamIdentifier:0' /dev/stdin <<< "$PROFILE_PLIST")
+
+          cp profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          echo "Using Provisioning Profile UUID: $PROFILE_UUID"
+          echo "TeamIdentifier from profile: $PROFILE_TEAM_ID"
+
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$CM_ENV"
+          echo "TEAM_ID=$PROFILE_TEAM_ID"   >> "$CM_ENV"
+
+          DIST_IDENTITY=$(security find-identity -v -p codesigning | sed -nE 's/.*"((Apple|iPhone) Distribution:.*)"/\1/p' | head -n1 || true)
+          if [ -z "$DIST_IDENTITY" ]; then
+            echo "❌ Distribution identity not found in keychain"
+            security find-identity -v -p codesigning || true
+            exit 1
+          fi
+          echo "DIST_IDENTITY=$DIST_IDENTITY" >> "$CM_ENV"
+          echo "Using signing identity: $DIST_IDENTITY"
+
+          echo "== Code signing identities in keychain =="; security find-identity -v -p codesigning || true
+
+          cat > exportOptions.plist <<EOI
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>${EXPORT_METHOD}</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${BUNDLE_ID}</key><string>${PROFILE_UUID}</string>
+            </dict>
+            <key>stripSwiftSymbols</key><true/>
+            <key>destination</key><string>export</string>
+          </dict>
+          </plist>
+          EOI
+          /usr/bin/plutil -lint exportOptions.plist
+
+          xcode-project use-profiles --project "$XCODE_PROJECT" --export-options-plist exportOptions.plist
+
+      - name: "Prepare versions (no Info.plist)"
         script: |
           set -euo pipefail
-          base64 < dist.p12 > dist.p12.b64
+          BUILD_NUM="${APP_BUILD:-$(date +%y%j%H%M%S)}"
+          echo "BUILD_NUM=$BUILD_NUM" >> "$CM_ENV"
+          if [ -n "${APP_VERSION:-}" ]; then
+            echo "APP_VERSION=$APP_VERSION" >> "$CM_ENV"
+          fi
+          echo "== Planned versions =="
+          echo "MARKETING_VERSION=${APP_VERSION:-(unchanged)}"
+          echo "CURRENT_PROJECT_VERSION=$BUILD_NUM"
+
+      - name: "Archive and export IPA (xcodebuild)"
+        script: |
+          ARCHIVE_PATH="$CM_BUILD_DIR/"Cost Per Wear Smart Wardrober.xcarchive"
+          EXPORT_PATH="$CM_EXPORT_DIR"
+
+          EXTRA_FLAGS=( CURRENT_PROJECT_VERSION="$BUILD_NUM" )
+          if [ -n "${APP_VERSION:-}" ]; then
+            EXTRA_FLAGS+=( MARKETING_VERSION="$APP_VERSION" )
+          fi
+
+          echo "Archiving to: $ARCHIVE_PATH"
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -archivePath "$ARCHIVE_PATH" \
+            archive \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            "${EXTRA_FLAGS[@]}"
+
+          echo "Exporting IPA to: $EXPORT_PATH"
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportOptionsPlist exportOptions.plist \
+            -exportPath "$EXPORT_PATH"
+
+          echo "Export dir listing:"
+          ls -lah "$EXPORT_PATH" || true
+          test -e "$EXPORT_PATH"/*.ipa
+
     artifacts:
-      - dist.p12.b64
+      - $CM_EXPORT_DIR/*.ipa
+      - $CM_EXPORT_DIR/*.dSYM.zip
+      - $CM_EXPORT_DIR/*.xcarchive
+
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true
