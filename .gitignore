@@ -1,0 +1,24 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserdatad
+*.xcscmblueprint
+*.xccheckout
+
+# iOS artifacts
+*.ipa
+*.dSYM*
+*.xcarchive
+
+# CocoaPods (если появятся)
+Pods/
+Podfile.lock
+
+# Signing (секреты не коммитим)
+*.p12
+*.mobileprovision
+*.p8
+
+# Misc
+.DS_Store
+.idea/
