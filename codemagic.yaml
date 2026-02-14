@@ -133,7 +133,7 @@ workflows:
 
       - name: "Archive and export IPA (xcodebuild)"
         script: |
-          ARCHIVE_PATH="$CM_BUILD_DIR/"Cost Per Wear Smart Wardrober.xcarchive"
+          ARCHIVE_PATH="$CM_BUILD_DIR/Cost Per Wear Smart Wardrober.xcarchive"
           EXPORT_PATH="$CM_EXPORT_DIR"
 
           EXTRA_FLAGS=( CURRENT_PROJECT_VERSION="$BUILD_NUM" )
