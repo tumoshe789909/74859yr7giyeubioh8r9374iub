@@ -8,8 +8,8 @@ workflows:
         - signing            # CERTIFICATE_P12, CERTIFICATE_PASSWORD, MOBILEPROVISION
         - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
       vars:
-        XCODE_PROJECT: "Cost Per Wear Smart Wardrober.xcodeproj"
-        XCODE_SCHEME: "Cost Per Wear Smart Wardrobe"
+        XCODE_PROJECT: "Cost Per Wear Smart Wardrobe.xcodeproj"
+        XCODE_SCHEME: "Cost Per Wear Smart Wardrober"
         BUNDLE_ID: "io.denominator.turner"
         TEAM_ID: "OVERRIDE_BY_PROFILE"
         EXPORT_METHOD: "app-store"
@@ -133,7 +133,7 @@ workflows:
 
       - name: "Archive and export IPA (xcodebuild)"
         script: |
-          ARCHIVE_PATH="$CM_BUILD_DIR/Cost Per Wear Smart Wardrober.xcarchive"
+          ARCHIVE_PATH="$CM_BUILD_DIR/Cost Per Wear Smart Wardrobe.xcarchive"
           EXPORT_PATH="$CM_EXPORT_DIR"
 
           EXTRA_FLAGS=( CURRENT_PROJECT_VERSION="$BUILD_NUM" )
